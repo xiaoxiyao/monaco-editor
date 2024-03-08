@@ -140,7 +140,7 @@ function buildOneAMD(
 	const opts: esbuild.BuildOptions = {
 		entryPoints: [options.entryPoint],
 		bundle: true,
-		target: 'esnext',
+		target: 'es2017',
 		format: 'iife',
 		drop: ['debugger'],
 		define: {
