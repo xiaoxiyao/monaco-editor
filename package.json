@@ -34,7 +34,7 @@
 	"module": "./esm/vs/editor/editor.main.js",
 	"repository": {
 		"type": "git",
-		"url": "https://github.com/microsoft/monaco-editor"
+		"url": "git+https://github.com/microsoft/monaco-editor.git"
 	},
 	"devDependencies": {
 		"@types/mocha": "^9.1.0",

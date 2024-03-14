@@ -22,7 +22,8 @@ import {
 	IDisposable,
 	IRange,
 	MarkerTag,
-	MarkerSeverity
+	MarkerSeverity,
+	IMarkdownString
 } from '../../fillers/monaco-editor-core';
 
 //#region utils copied from typescript to prevent loading the entire typescriptServices ---
@@ -68,26 +69,38 @@ function displayPartsToString(displayParts: ts.SymbolDisplayPart[] | undefined):
 	return '';
 }
 
+function parseKindModifier(kindModifiers: string): Set<string> {
+	return new Set(kindModifiers.split(/,|\s+/g));
+}
+
+function getScriptKindDetails(tsEntry: ts.CompletionEntry): string | undefined {
+	if (!tsEntry.kindModifiers || tsEntry.kind !== ScriptElementKind.scriptElement) {
+		return;
+	}
+
+	const kindModifiers = parseKindModifier(tsEntry.kindModifiers);
+	for (const extModifier of KindModifiers.fileExtensionKindModifiers) {
+		if (kindModifiers.has(extModifier)) {
+			if (tsEntry.name.toLowerCase().endsWith(extModifier)) {
+				return tsEntry.name;
+			} else {
+				return tsEntry.name + extModifier;
+			}
+		}
+	}
+	return undefined;
+}
+
+function textSpanToRange(model: editor.ITextModel, span: ts.TextSpan): Range {
+	const p1 = model.getPositionAt(span.start);
+	const p2 = model.getPositionAt(span.start + span.length);
+	return Range.fromPositions(p1, p2);
+}
+
 //#endregion
 
 export abstract class Adapter {
 	constructor(protected _worker: (...uris: Uri[]) => Promise<TypeScriptWorker>) {}
-
-	// protected _positionToOffset(model: editor.ITextModel, position: monaco.IPosition): number {
-	// 	return model.getOffsetAt(position);
-	// }
-
-	// protected _offsetToPosition(model: editor.ITextModel, offset: number): monaco.IPosition {
-	// 	return model.getPositionAt(offset);
-	// }
-
-	protected _textSpanToRange(model: editor.ITextModel, span: ts.TextSpan): IRange {
-		let p1 = model.getPositionAt(span.start);
-		let p2 = model.getPositionAt(span.start + span.length);
-		let { lineNumber: startLineNumber, column: startColumn } = p1;
-		let { lineNumber: endLineNumber, column: endColumn } = p2;
-		return { startLineNumber, startColumn, endLineNumber, endColumn };
-	}
 }
 
 // --- lib files
@@ -425,16 +438,339 @@ export class DiagnosticsAdapter extends Adapter {
 
 // --- suggest ------
 
-interface MyCompletionItem extends languages.CompletionItem {
-	label: string;
-	uri: Uri;
-	position: Position;
-	offset: number;
+interface DotAccessorContext {
+	readonly range: Range;
+	readonly text: string;
 }
+
+interface CompletionContext {
+	readonly isNewIdentifierLocation: boolean;
+	readonly isMemberCompletion: boolean;
+
+	readonly dotAccessorContext?: DotAccessorContext;
+
+	readonly enableCallCompletions: boolean;
+	readonly completeFunctionCalls: boolean;
+
+	readonly wordRange: Range;
+	readonly line: string;
+	readonly optionalReplacementRange: Range | undefined;
+}
+
+class MyCompletionItem implements languages.CompletionItem {
+	label: string | languages.CompletionItemLabel;
+	kind: languages.CompletionItemKind;
+	tags?: readonly languages.CompletionItemTag[] | undefined;
+	detail?: string | undefined;
+	sortText?: string | undefined;
+	filterText?: string | undefined;
+	preselect?: boolean | undefined;
+	documentation?: string | IMarkdownString;
+	insertText: string;
+	insertTextRules?: languages.CompletionItemInsertTextRule | undefined;
+	range: IRange | languages.CompletionItemRanges;
+	commitCharacters?: string[] | undefined;
+	additionalTextEdits?: editor.ISingleEditOperation[] | undefined;
+	command?: languages.Command | undefined;
+	uri: Uri;
+	offset: number;
+	constructor(
+		private readonly model: editor.ITextModel,
+		public readonly position: Position,
+		public readonly tsEntry: ts.CompletionEntry,
+		private readonly completionContext: CompletionContext,
+		public readonly metadata: any | undefined
+	) {
+		this.uri = model.uri;
+		this.offset = model.getOffsetAt(position);
+		const label = tsEntry.name || (tsEntry.insertText ?? '');
+		this.label = label;
+		this.kind = MyCompletionItem.convertKind(tsEntry.kind);
+		if (tsEntry.source && tsEntry.hasAction) {
+			// De-prioritze auto-imports
+			// https://github.com/microsoft/vscode/issues/40311
+			this.sortText = '\uffff' + tsEntry.sortText;
+		} else {
+			this.sortText = tsEntry.sortText;
+		}
+
+		const sourceDisplay = tsEntry.sourceDisplay;
+		if (sourceDisplay) {
+			this.label = { label, description: displayPartsToString(sourceDisplay) };
+		}
+		if (tsEntry.labelDetails) {
+			this.label = { label, ...tsEntry.labelDetails };
+		}
+		this.preselect = tsEntry.isRecommended;
+		this.position = position;
+
+		let range = this.getRangeFromReplacementSpan(tsEntry, completionContext);
+
+		this.commitCharacters = MyCompletionItem.getCommitCharacters(completionContext, tsEntry);
+		this.insertText = tsEntry.insertText ?? tsEntry.name;
+		this.filterText = this.getFilterText(completionContext.line, tsEntry.insertText);
+		const wordRange = this.completionContext.wordRange;
+		if (completionContext.isMemberCompletion && completionContext.dotAccessorContext) {
+			this.filterText =
+				completionContext.dotAccessorContext.text + (this.insertText || this.textLabel);
+			if (!range) {
+				range = {
+					insert: completionContext.dotAccessorContext.range,
+					replace: completionContext.dotAccessorContext.range.plusRange(wordRange)
+				};
+				this.insertText = this.filterText;
+			}
+		}
+		this.range = range ?? wordRange;
+		if (tsEntry.kindModifiers) {
+			const kindModifiers = parseKindModifier(tsEntry.kindModifiers);
+			if (kindModifiers.has(KindModifiers.optional)) {
+				this.insertText ??= this.textLabel;
+				this.filterText ??= this.textLabel;
+
+				if (typeof this.label === 'string') {
+					this.label += '?';
+				} else {
+					this.label.label += '?';
+				}
+			}
+			if (kindModifiers.has(KindModifiers.deprecated)) {
+				this.tags = [languages.CompletionItemTag.Deprecated];
+			}
+
+			if (kindModifiers.has(KindModifiers.color)) {
+				this.kind = languages.CompletionItemKind.Color;
+			}
+
+			this.detail = getScriptKindDetails(tsEntry);
+		}
+	}
+
+	private get textLabel() {
+		return typeof this.label === 'string' ? this.label : this.label.label;
+	}
+
+	private getRangeFromReplacementSpan(
+		tsEntry: ts.CompletionEntry,
+		completionContext: CompletionContext
+	): languages.CompletionItemRanges | undefined {
+		let model = this.model;
+		if (!tsEntry.replacementSpan) {
+			if (completionContext.optionalReplacementRange) {
+				return {
+					insert: Range.fromPositions(
+						completionContext.optionalReplacementRange.getStartPosition(),
+						this.position
+					),
+					replace: completionContext.optionalReplacementRange
+				};
+			}
+
+			return undefined;
+		}
+
+		// If TS returns an explicit replacement range on this item, we should use it for both types of completion
+
+		// Make sure we only replace a single line at most
+		if (tsEntry.replacementSpan) {
+			let replaceRange = textSpanToRange(model, tsEntry.replacementSpan);
+			if (Range.spansMultipleLines(replaceRange)) {
+				replaceRange = new Range(
+					replaceRange.startLineNumber,
+					replaceRange.startColumn,
+					replaceRange.startLineNumber,
+					completionContext.line.length
+				);
+			}
+			return {
+				insert: replaceRange,
+				replace: replaceRange
+			};
+		}
+	}
+
+	private getFilterText(line: string, insertText: string | undefined): string | undefined {
+		// Handle private field completions
+		if (this.tsEntry.name.startsWith('#')) {
+			const wordRange = this.completionContext.wordRange;
+			const wordStart = wordRange ? line.charAt(wordRange.startColumn) : undefined;
+			if (insertText) {
+				if (insertText.startsWith('this.#')) {
+					return wordStart === '#' ? insertText : insertText.replace(/^this\.#/, '');
+				} else {
+					return insertText;
+				}
+			} else {
+				return wordStart === '#' ? undefined : this.tsEntry.name.replace(/^#/, '');
+			}
+		}
+
+		// For `this.` completions, generally don't set the filter text since we don't want them to be overly prioritized. #74164
+		if (insertText?.startsWith('this.')) {
+			return undefined;
+		}
+
+		// Handle the case:
+		// ```
+		// const xyz = { 'ab c': 1 };
+		// xyz.ab|
+		// ```
+		// In which case we want to insert a bracket accessor but should use `.abc` as the filter text instead of
+		// the bracketed insert text.
+		else if (insertText?.startsWith('[')) {
+			return insertText.replace(/^\[['"](.+)[['"]\]$/, '.$1');
+		}
+
+		// In all other cases, fallback to using the insertText
+		return insertText;
+	}
+
+	public resolveCompletionItem(details: ts.CompletionEntryDetails): void {
+		const newItemDetails = this.getDetails(details);
+		if (newItemDetails) {
+			this.detail = newItemDetails;
+		}
+		this.documentation = this.getDocumentation(details);
+		this.command = this.getCommand(details);
+	}
+
+	private getDetails(detail: ts.CompletionEntryDetails): string | undefined {
+		const parts: string[] = [];
+
+		if (detail.kind === ScriptElementKind.scriptElement) {
+			// details were already added
+			return undefined;
+		}
+
+		for (const action of detail.codeActions ?? []) {
+			parts.push(action.description);
+		}
+
+		parts.push(displayPartsToString(detail.displayParts));
+		return parts.join('\n\n');
+	}
+
+	private getDocumentation(details: ts.CompletionEntryDetails): IMarkdownString | undefined {
+		let documentationString = displayPartsToString(details.documentation);
+		if (details.tags) {
+			for (const tag of details.tags) {
+				documentationString += `\n\n${tagToString(tag)}`;
+			}
+		}
+		if (!documentationString.length) {
+			return undefined;
+		}
+		return {
+			value: documentationString,
+			baseUri: this.uri
+		};
+	}
+
+	private getCommand(detail: ts.CompletionEntryDetails): languages.Command | undefined {
+		if (!detail.codeActions?.length) {
+			return undefined;
+		}
+
+		return {
+			id: ApplyCompletionCommand.ID,
+			title: '',
+			arguments: [this.uri, detail.codeActions]
+		};
+	}
+
+	private static convertKind(kind: ScriptElementKind): languages.CompletionItemKind {
+		switch (kind) {
+			case ScriptElementKind.primitiveType:
+			case ScriptElementKind.keyword:
+				return languages.CompletionItemKind.Keyword;
+			case ScriptElementKind.variableElement:
+			case ScriptElementKind.localVariableElement:
+				return languages.CompletionItemKind.Variable;
+			case ScriptElementKind.memberVariableElement:
+			case ScriptElementKind.memberGetAccessorElement:
+			case ScriptElementKind.memberSetAccessorElement:
+				return languages.CompletionItemKind.Field;
+			case ScriptElementKind.functionElement:
+			case ScriptElementKind.memberFunctionElement:
+			case ScriptElementKind.constructSignatureElement:
+			case ScriptElementKind.callSignatureElement:
+			case ScriptElementKind.indexSignatureElement:
+				return languages.CompletionItemKind.Function;
+			case ScriptElementKind.enumElement:
+				return languages.CompletionItemKind.Enum;
+			case ScriptElementKind.moduleElement:
+				return languages.CompletionItemKind.Module;
+			case ScriptElementKind.classElement:
+				return languages.CompletionItemKind.Class;
+			case ScriptElementKind.interfaceElement:
+				return languages.CompletionItemKind.Interface;
+			case ScriptElementKind.warning:
+				return languages.CompletionItemKind.File;
+		}
+
+		return languages.CompletionItemKind.Property;
+	}
+
+	private static getCommitCharacters(
+		context: CompletionContext,
+		entry: ts.CompletionEntry
+	): string[] | undefined {
+		if (entry.kind === ScriptElementKind.warning || entry.kind === ScriptElementKind.string) {
+			// Ambient JS word based suggestion, strings
+			return undefined;
+		}
+
+		if (context.isNewIdentifierLocation) {
+			return undefined;
+		}
+
+		const commitCharacters: string[] = ['.', ',', ';'];
+		if (context.enableCallCompletions) {
+			commitCharacters.push('(');
+		}
+
+		return commitCharacters;
+	}
+}
+
+class ApplyCompletionCommand implements editor.ICommandDescriptor {
+	public static readonly ID = '_typescript.applyCompletionCommand';
+	public readonly id = ApplyCompletionCommand.ID;
+
+	public async run(accessor: any, resource: Uri, codeActions: ts.CodeAction[]): Promise<void> {
+		if (codeActions.length === 0) {
+			return;
+		}
+		let model = editor.getModel(resource);
+		if (model == null) {
+			return;
+		}
+		for (const action of codeActions) {
+			if (action.commands) {
+				console.log(action.commands); // TODO 如何运行action中的command？
+			}
+			action.changes?.forEach((change) => {
+				// 暂时只处理当前文件的更改
+				if (change.fileName === resource.toString()) {
+					model!.applyEdits(
+						change.textChanges?.map((textChange) => {
+							return {
+								range: textSpanToRange(model!, textChange.span),
+								text: textChange.newText
+							};
+						})
+					);
+				}
+			});
+		}
+	}
+}
+
+editor.addCommand(new ApplyCompletionCommand());
 
 export class SuggestAdapter extends Adapter implements languages.CompletionItemProvider {
 	public get triggerCharacters(): string[] {
-		return ['.'];
+		return ['.', '"', "'", '`', '/', '@', '<', '#', ' '];
 	}
 
 	public async provideCompletionItems(
@@ -443,6 +779,23 @@ export class SuggestAdapter extends Adapter implements languages.CompletionItemP
 		_context: languages.CompletionContext,
 		token: CancellationToken
 	): Promise<languages.CompletionList | undefined> {
+		const resource = model.uri;
+		const worker = await this._worker(resource);
+		if (token.isCancellationRequested || model.isDisposed()) {
+			return;
+		}
+		const offset = model.getOffsetAt(position);
+		const info = await worker.getCompletionsAtPosition(resource.toString(), offset, {
+			includeCompletionsForModuleExports: true,
+			includeCompletionsWithInsertText: true,
+			includeCompletionsForImportStatements: true,
+			triggerCharacter: _context.triggerCharacter as ts.CompletionsTriggerCharacter,
+			triggerKind: SuggestAdapter.convertTriggerKind(_context.triggerKind)
+		});
+
+		if (!info || model.isDisposed() || token.isCancellationRequested) {
+			return;
+		}
 		const wordInfo = model.getWordUntilPosition(position);
 		const wordRange = new Range(
 			position.lineNumber,
@@ -450,45 +803,32 @@ export class SuggestAdapter extends Adapter implements languages.CompletionItemP
 			position.lineNumber,
 			wordInfo.endColumn
 		);
-		const resource = model.uri;
-		const offset = model.getOffsetAt(position);
 
-		const worker = await this._worker(resource);
-
-		if (model.isDisposed()) {
-			return;
+		const line = model.getLineContent(position.lineNumber);
+		let dotAccessorContext;
+		const isMemberCompletion = info.isMemberCompletion;
+		if (isMemberCompletion) {
+			const dotMatch = line.slice(0, position.column).match(/\??\.\s*$/) || undefined;
+			if (dotMatch) {
+				const range = Range.fromPositions(position.delta(0, -dotMatch[0].length), position);
+				const text = model.getValueInRange(range);
+				dotAccessorContext = { range, text };
+			}
 		}
-
-		const info = await worker.getCompletionsAtPosition(resource.toString(), offset, undefined);
-
-		if (!info || model.isDisposed()) {
-			return;
-		}
+		const completionContext: CompletionContext = {
+			isNewIdentifierLocation: info.isNewIdentifierLocation,
+			isMemberCompletion,
+			dotAccessorContext,
+			enableCallCompletions: true,
+			wordRange,
+			line,
+			completeFunctionCalls: true,
+			optionalReplacementRange:
+				info.optionalReplacementSpan && textSpanToRange(model, info.optionalReplacementSpan)
+		};
 
 		const suggestions: MyCompletionItem[] = info.entries.map((entry) => {
-			let range = wordRange;
-			if (entry.replacementSpan) {
-				const p1 = model.getPositionAt(entry.replacementSpan.start);
-				const p2 = model.getPositionAt(entry.replacementSpan.start + entry.replacementSpan.length);
-				range = new Range(p1.lineNumber, p1.column, p2.lineNumber, p2.column);
-			}
-
-			const tags: languages.CompletionItemTag[] = [];
-			if (entry.kindModifiers !== undefined && entry.kindModifiers.indexOf('deprecated') !== -1) {
-				tags.push(languages.CompletionItemTag.Deprecated);
-			}
-
-			return {
-				uri: resource,
-				position: position,
-				offset: offset,
-				range: range,
-				label: entry.name,
-				insertText: entry.name,
-				sortText: entry.sortText,
-				kind: SuggestAdapter.convertKind(entry.kind),
-				tags
-			};
+			return new MyCompletionItem(model, position, entry, completionContext, info.metadata);
 		});
 
 		return {
@@ -502,75 +842,40 @@ export class SuggestAdapter extends Adapter implements languages.CompletionItemP
 	): Promise<languages.CompletionItem> {
 		const myItem = <MyCompletionItem>item;
 		const resource = myItem.uri;
-		const position = myItem.position;
 		const offset = myItem.offset;
 
 		const worker = await this._worker(resource);
+		if (token.isCancellationRequested) {
+			return myItem;
+		}
+		const entry = myItem.tsEntry;
 		const details = await worker.getCompletionEntryDetails(
 			resource.toString(),
 			offset,
-			myItem.label,
+			entry.name,
+			{},
+			entry.source,
 			undefined,
-			undefined,
-			undefined,
-			undefined
+			entry.data
 		);
-		if (!details) {
+		if (token.isCancellationRequested || !details) {
 			return myItem;
 		}
-		return <MyCompletionItem>{
-			uri: resource,
-			position: position,
-			label: details.name,
-			kind: SuggestAdapter.convertKind(details.kind),
-			detail: displayPartsToString(details.displayParts),
-			documentation: {
-				value: SuggestAdapter.createDocumentationString(details)
-			}
-		};
+		myItem.resolveCompletionItem(details);
+		return myItem;
 	}
 
-	private static convertKind(kind: string): languages.CompletionItemKind {
+	private static convertTriggerKind(
+		kind: languages.CompletionTriggerKind
+	): ts.CompletionTriggerKind {
 		switch (kind) {
-			case Kind.primitiveType:
-			case Kind.keyword:
-				return languages.CompletionItemKind.Keyword;
-			case Kind.variable:
-			case Kind.localVariable:
-				return languages.CompletionItemKind.Variable;
-			case Kind.memberVariable:
-			case Kind.memberGetAccessor:
-			case Kind.memberSetAccessor:
-				return languages.CompletionItemKind.Field;
-			case Kind.function:
-			case Kind.memberFunction:
-			case Kind.constructSignature:
-			case Kind.callSignature:
-			case Kind.indexSignature:
-				return languages.CompletionItemKind.Function;
-			case Kind.enum:
-				return languages.CompletionItemKind.Enum;
-			case Kind.module:
-				return languages.CompletionItemKind.Module;
-			case Kind.class:
-				return languages.CompletionItemKind.Class;
-			case Kind.interface:
-				return languages.CompletionItemKind.Interface;
-			case Kind.warning:
-				return languages.CompletionItemKind.File;
+			case languages.CompletionTriggerKind.Invoke:
+				return 1;
+			case languages.CompletionTriggerKind.TriggerCharacter:
+				return 2;
+			case languages.CompletionTriggerKind.TriggerForIncompleteCompletions:
+				return 3;
 		}
-
-		return languages.CompletionItemKind.Property;
-	}
-
-	private static createDocumentationString(details: ts.CompletionEntryDetails): string {
-		let documentationString = displayPartsToString(details.documentation);
-		if (details.tags) {
-			for (const tag of details.tags) {
-				documentationString += `\n\n${tagToString(tag)}`;
-			}
-		}
-		return documentationString;
 	}
 }
 
@@ -704,7 +1009,7 @@ export class QuickInfoAdapter extends Adapter implements languages.HoverProvider
 		const tags = info.tags ? info.tags.map((tag) => tagToString(tag)).join('  \n\n') : '';
 		const contents = displayPartsToString(info.displayParts);
 		return {
-			range: this._textSpanToRange(model, info.textSpan),
+			range: textSpanToRange(model, info.textSpan),
 			contents: [
 				{
 					value: '```typescript\n' + contents + '\n```\n'
@@ -747,7 +1052,7 @@ export class DocumentHighlightAdapter
 		return entries.flatMap((entry) => {
 			return entry.highlightSpans.map((highlightSpans) => {
 				return <languages.DocumentHighlight>{
-					range: this._textSpanToRange(model, highlightSpans.textSpan),
+					range: textSpanToRange(model, highlightSpans.textSpan),
 					kind:
 						highlightSpans.kind === 'writtenReference'
 							? languages.DocumentHighlightKind.Write
@@ -802,7 +1107,7 @@ export class DefinitionAdapter extends Adapter {
 			if (refModel) {
 				result.push({
 					uri: refModel.uri,
-					range: this._textSpanToRange(refModel, entry.textSpan)
+					range: textSpanToRange(refModel, entry.textSpan)
 				});
 			}
 		}
@@ -855,7 +1160,7 @@ export class ReferenceAdapter extends Adapter implements languages.ReferenceProv
 			if (refModel) {
 				result.push({
 					uri: refModel.uri,
-					range: this._textSpanToRange(refModel, entry.textSpan)
+					range: textSpanToRange(refModel, entry.textSpan)
 				});
 			}
 		}
@@ -891,8 +1196,8 @@ export class OutlineAdapter extends Adapter implements languages.DocumentSymbolP
 				name: item.text,
 				detail: '',
 				kind: <languages.SymbolKind>(outlineTypeTable[item.kind] || languages.SymbolKind.Variable),
-				range: this._textSpanToRange(model, item.spans[0]),
-				selectionRange: this._textSpanToRange(model, item.spans[0]),
+				range: textSpanToRange(model, item.spans[0]),
+				selectionRange: textSpanToRange(model, item.spans[0]),
 				tags: [],
 				children: item.childItems?.map((child) => convert(child, item.text)),
 				containerName: containerLabel
@@ -906,54 +1211,127 @@ export class OutlineAdapter extends Adapter implements languages.DocumentSymbolP
 	}
 }
 
-export class Kind {
-	public static unknown: string = '';
-	public static keyword: string = 'keyword';
-	public static script: string = 'script';
-	public static module: string = 'module';
-	public static class: string = 'class';
-	public static interface: string = 'interface';
-	public static type: string = 'type';
-	public static enum: string = 'enum';
-	public static variable: string = 'var';
-	public static localVariable: string = 'local var';
-	public static function: string = 'function';
-	public static localFunction: string = 'local function';
-	public static memberFunction: string = 'method';
-	public static memberGetAccessor: string = 'getter';
-	public static memberSetAccessor: string = 'setter';
-	public static memberVariable: string = 'property';
-	public static constructorImplementation: string = 'constructor';
-	public static callSignature: string = 'call';
-	public static indexSignature: string = 'index';
-	public static constructSignature: string = 'construct';
-	public static parameter: string = 'parameter';
-	public static typeParameter: string = 'type parameter';
-	public static primitiveType: string = 'primitive type';
-	public static label: string = 'label';
-	public static alias: string = 'alias';
-	public static const: string = 'const';
-	public static let: string = 'let';
-	public static warning: string = 'warning';
+enum ScriptElementKind {
+	unknown = '',
+	warning = 'warning',
+	/** predefined type (void) or keyword (class) */
+	keyword = 'keyword',
+	/** top level script node */
+	scriptElement = 'script',
+	/** module foo {} */
+	moduleElement = 'module',
+	/** class X {} */
+	classElement = 'class',
+	/** var x = class X {} */
+	localClassElement = 'local class',
+	/** interface Y {} */
+	interfaceElement = 'interface',
+	/** type T = ... */
+	typeElement = 'type',
+	/** enum E */
+	enumElement = 'enum',
+	enumMemberElement = 'enum member',
+	/**
+	 * Inside module and script only
+	 * const v = ..
+	 */
+	variableElement = 'var',
+	/** Inside function */
+	localVariableElement = 'local var',
+	/**
+	 * Inside module and script only
+	 * function f() { }
+	 */
+	functionElement = 'function',
+	/** Inside function */
+	localFunctionElement = 'local function',
+	/** class X { [public|private]* foo() {} } */
+	memberFunctionElement = 'method',
+	/** class X { [public|private]* [get|set] foo:number; } */
+	memberGetAccessorElement = 'getter',
+	memberSetAccessorElement = 'setter',
+	/**
+	 * class X { [public|private]* foo:number; }
+	 * interface Y { foo:number; }
+	 */
+	memberVariableElement = 'property',
+	/** class X { [public|private]* accessor foo: number; } */
+	memberAccessorVariableElement = 'accessor',
+	/**
+	 * class X { constructor() { } }
+	 * class X { static { } }
+	 */
+	constructorImplementationElement = 'constructor',
+	/** interface Y { ():number; } */
+	callSignatureElement = 'call',
+	/** interface Y { []:number; } */
+	indexSignatureElement = 'index',
+	/** interface Y { new():Y; } */
+	constructSignatureElement = 'construct',
+	/** function foo(*Y*: string) */
+	parameterElement = 'parameter',
+	typeParameterElement = 'type parameter',
+	primitiveType = 'primitive type',
+	label = 'label',
+	alias = 'alias',
+	constElement = 'const',
+	letElement = 'let',
+	directory = 'directory',
+	externalModuleName = 'external module name',
+	/**
+	 * <JsxTagName attribute1 attribute2={0} />
+	 * @deprecated
+	 */
+	jsxAttribute = 'JSX attribute',
+	/** String literal */
+	string = 'string',
+	/** Jsdoc @link: in `{@link C link text}`, the before and after text "{@link " and "}" */
+	link = 'link',
+	/** Jsdoc @link: in `{@link C link text}`, the entity name "C" */
+	linkName = 'link name',
+	/** Jsdoc @link: in `{@link C link text}`, the link text "link text" */
+	linkText = 'link text'
+}
+
+class KindModifiers {
+	public static readonly optional = 'optional';
+	public static readonly deprecated = 'deprecated';
+	public static readonly color = 'color';
+
+	public static readonly dtsFile = '.d.ts';
+	public static readonly tsFile = '.ts';
+	public static readonly tsxFile = '.tsx';
+	public static readonly jsFile = '.js';
+	public static readonly jsxFile = '.jsx';
+	public static readonly jsonFile = '.json';
+
+	public static readonly fileExtensionKindModifiers = [
+		KindModifiers.dtsFile,
+		KindModifiers.tsFile,
+		KindModifiers.tsxFile,
+		KindModifiers.jsFile,
+		KindModifiers.jsxFile,
+		KindModifiers.jsonFile
+	];
 }
 
 let outlineTypeTable: {
 	[kind: string]: languages.SymbolKind;
 } = Object.create(null);
-outlineTypeTable[Kind.module] = languages.SymbolKind.Module;
-outlineTypeTable[Kind.class] = languages.SymbolKind.Class;
-outlineTypeTable[Kind.enum] = languages.SymbolKind.Enum;
-outlineTypeTable[Kind.interface] = languages.SymbolKind.Interface;
-outlineTypeTable[Kind.memberFunction] = languages.SymbolKind.Method;
-outlineTypeTable[Kind.memberVariable] = languages.SymbolKind.Property;
-outlineTypeTable[Kind.memberGetAccessor] = languages.SymbolKind.Property;
-outlineTypeTable[Kind.memberSetAccessor] = languages.SymbolKind.Property;
-outlineTypeTable[Kind.variable] = languages.SymbolKind.Variable;
-outlineTypeTable[Kind.const] = languages.SymbolKind.Variable;
-outlineTypeTable[Kind.localVariable] = languages.SymbolKind.Variable;
-outlineTypeTable[Kind.variable] = languages.SymbolKind.Variable;
-outlineTypeTable[Kind.function] = languages.SymbolKind.Function;
-outlineTypeTable[Kind.localFunction] = languages.SymbolKind.Function;
+outlineTypeTable[ScriptElementKind.moduleElement] = languages.SymbolKind.Module;
+outlineTypeTable[ScriptElementKind.classElement] = languages.SymbolKind.Class;
+outlineTypeTable[ScriptElementKind.enumElement] = languages.SymbolKind.Enum;
+outlineTypeTable[ScriptElementKind.interfaceElement] = languages.SymbolKind.Interface;
+outlineTypeTable[ScriptElementKind.memberFunctionElement] = languages.SymbolKind.Method;
+outlineTypeTable[ScriptElementKind.memberVariableElement] = languages.SymbolKind.Property;
+outlineTypeTable[ScriptElementKind.memberGetAccessorElement] = languages.SymbolKind.Property;
+outlineTypeTable[ScriptElementKind.memberSetAccessorElement] = languages.SymbolKind.Property;
+outlineTypeTable[ScriptElementKind.variableElement] = languages.SymbolKind.Variable;
+outlineTypeTable[ScriptElementKind.constElement] = languages.SymbolKind.Variable;
+outlineTypeTable[ScriptElementKind.localVariableElement] = languages.SymbolKind.Variable;
+outlineTypeTable[ScriptElementKind.variableElement] = languages.SymbolKind.Variable;
+outlineTypeTable[ScriptElementKind.functionElement] = languages.SymbolKind.Function;
+outlineTypeTable[ScriptElementKind.localFunctionElement] = languages.SymbolKind.Function;
 
 // --- formatting ----
 
@@ -984,7 +1362,7 @@ export abstract class FormatHelper extends Adapter {
 	): languages.TextEdit {
 		return {
 			text: change.newText,
-			range: this._textSpanToRange(model, change.span)
+			range: textSpanToRange(model, change.span)
 		};
 	}
 }
@@ -1138,7 +1516,7 @@ export class CodeActionAdaptor extends FormatHelper implements languages.CodeAct
 					resource: model.uri,
 					versionId: undefined,
 					textEdit: {
-						range: this._textSpanToRange(model, textChange.span),
+						range: textSpanToRange(model, textChange.span),
 						text: textChange.newText
 					}
 				});
@@ -1213,7 +1591,7 @@ export class RenameAdapter extends Adapter implements languages.RenameProvider {
 					resource: model.uri,
 					versionId: undefined,
 					textEdit: {
-						range: this._textSpanToRange(model, renameLocation.textSpan),
+						range: textSpanToRange(model, renameLocation.textSpan),
 						text: newName
 					}
 				});

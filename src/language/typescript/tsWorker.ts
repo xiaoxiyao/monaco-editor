@@ -186,6 +186,34 @@ export class TypeScriptWorker implements ts.LanguageServiceHost, ITypeScriptWork
 		return this._getScriptText(path);
 	}
 
+	readDirectory(
+		path: string,
+		extensions?: readonly string[] | undefined,
+		exclude?: readonly string[] | undefined,
+		include?: readonly string[] | undefined,
+		depth?: number | undefined
+	): string[] {
+		const files: string[] = [];
+		const models = this._ctx.getMirrorModels();
+		models.forEach((model) => {
+			const uri = model.uri.toString();
+			if (uri.startsWith(path)) {
+				files.push(uri);
+			}
+		});
+		Object.keys(this._extraLibs).forEach((key) => {
+			if (key.startsWith(path)) {
+				files.push(key);
+			}
+		});
+		files.sort();
+		return files;
+	}
+
+	useCaseSensitiveFileNames(): boolean {
+		return this._compilerOptions?.forceConsistentCasingInFileNames ?? true;
+	}
+
 	fileExists(path: string): boolean {
 		return this._getScriptText(path) !== undefined;
 	}
@@ -273,7 +301,7 @@ export class TypeScriptWorker implements ts.LanguageServiceHost, ITypeScriptWork
 		fileName: string,
 		position: number,
 		entryName: string,
-		formatOptions: ts.FormatCodeOptions | ts.FormatCodeSettings | undefined,
+		formatOptions: ts.FormatCodeOptions | ts.FormatCodeSettings,
 		source: string | undefined,
 		preferences: ts.UserPreferences | undefined,
 		data: ts.CompletionEntryData | undefined
