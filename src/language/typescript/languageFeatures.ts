@@ -752,13 +752,15 @@ class ApplyCompletionCommand implements editor.ICommandDescriptor {
 			action.changes?.forEach((change) => {
 				// 暂时只处理当前文件的更改
 				if (change.fileName === resource.toString()) {
-					model!.applyEdits(
+					model!.pushEditOperations(
+						null,
 						change.textChanges?.map((textChange) => {
 							return {
 								range: textSpanToRange(model!, textChange.span),
 								text: textChange.newText
 							};
-						})
+						}),
+						() => null
 					);
 				}
 			});
