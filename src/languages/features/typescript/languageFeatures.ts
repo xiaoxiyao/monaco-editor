@@ -1587,8 +1587,16 @@ export class RenameAdapter extends Adapter implements languages.RenameProvider {
 		}
 
 		const edits: languages.IWorkspaceTextEdit[] = [];
+		const extraLibs = typescriptDefaults.getExtraLibs();
 		for (const renameLocation of renameLocations) {
-			const model = this._libFiles.getOrCreateModel(renameLocation.fileName);
+			const fileName = renameLocation.fileName;
+			if (fileName in extraLibs) {
+				return {
+					edits: [],
+					rejectReason: 'Cannot rename in extra lib file'
+				};
+			}
+			const model = this._libFiles.getOrCreateModel(fileName);
 			if (model) {
 				edits.push({
 					resource: model.uri,
@@ -1599,7 +1607,7 @@ export class RenameAdapter extends Adapter implements languages.RenameProvider {
 					}
 				});
 			} else {
-				throw new Error(`Unknown file ${renameLocation.fileName}.`);
+				throw new Error(`Unknown file ${fileName}.`);
 			}
 		}
 
