@@ -432,12 +432,12 @@ export class TypeScriptWorker implements ts.LanguageServiceHost, ITypeScriptWork
 	async getRenameInfo(
 		fileName: string,
 		position: number,
-		options: ts.RenameInfoOptions
+		preferences: ts.UserPreferences
 	): Promise<ts.RenameInfo> {
 		if (fileNameIsLib(fileName)) {
 			return { canRename: false, localizedErrorMessage: 'Cannot rename in lib file' };
 		}
-		return this._languageService.getRenameInfo(fileName, position, options);
+		return this._languageService.getRenameInfo(fileName, position, preferences);
 	}
 
 	async getEmitOutput(fileName: string): Promise<ts.EmitOutput> {

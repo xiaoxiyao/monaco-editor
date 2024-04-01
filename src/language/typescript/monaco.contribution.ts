@@ -527,10 +527,10 @@ export interface TypeScriptWorker {
 
 	/**
 	 * Get edits which should be applied to rename the item at the given file and position (or a failure reason).
-	 * @param options `typescript.RenameInfoOptions`
+	 * @param preferences `typescript.UserPreferences`
 	 * @returns `Promise<typescript.RenameInfo>`
 	 */
-	getRenameInfo(fileName: string, positon: number, options: any): Promise<any>;
+	getRenameInfo(fileName: string, positon: number, preferences: any): Promise<any>;
 
 	/**
 	 * Get transpiled output for the given file.
