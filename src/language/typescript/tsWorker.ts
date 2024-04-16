@@ -38,13 +38,11 @@ export class TypeScriptWorker implements ts.LanguageServiceHost, ITypeScriptWork
 	private _extraLibs: IExtraLibs = Object.create(null);
 	private _languageService = ts.createLanguageService(this);
 	private _compilerOptions: ts.CompilerOptions;
-	private _inlayHintsOptions?: ts.UserPreferences;
 
 	constructor(ctx: worker.IWorkerContext, createData: ICreateData) {
 		this._ctx = ctx;
 		this._compilerOptions = createData.compilerOptions;
 		this._extraLibs = createData.extraLibs;
-		this._inlayHintsOptions = createData.inlayHintsOptions;
 	}
 
 	// --- language service host ---------------
@@ -479,12 +477,12 @@ export class TypeScriptWorker implements ts.LanguageServiceHost, ITypeScriptWork
 	async provideInlayHints(
 		fileName: string,
 		start: number,
-		end: number
+		end: number,
+		preferences?: ts.UserPreferences
 	): Promise<readonly ts.InlayHint[]> {
 		if (fileNameIsLib(fileName)) {
 			return [];
 		}
-		const preferences: ts.UserPreferences = this._inlayHintsOptions ?? {};
 		const span: ts.TextSpan = {
 			start,
 			length: end - start
@@ -502,7 +500,6 @@ export interface ICreateData {
 	compilerOptions: ts.CompilerOptions;
 	extraLibs: IExtraLibs;
 	customWorkerPath?: string;
-	inlayHintsOptions?: ts.UserPreferences;
 }
 
 /** The shape of the factory */

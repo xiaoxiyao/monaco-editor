@@ -70,8 +70,7 @@ export class WorkerManager {
 					createData: {
 						compilerOptions: this._defaults.getCompilerOptions(),
 						extraLibs: this._defaults.getExtraLibs(),
-						customWorkerPath: this._defaults.workerOptions.customWorkerPath,
-						inlayHintsOptions: this._defaults.inlayHintsOptions
+						customWorkerPath: this._defaults.workerOptions.customWorkerPath
 					}
 				});
 

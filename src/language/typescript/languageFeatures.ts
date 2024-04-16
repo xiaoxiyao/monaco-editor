@@ -788,9 +788,7 @@ export class SuggestAdapter extends Adapter implements languages.CompletionItemP
 		}
 		const offset = model.getOffsetAt(position);
 		const info = await worker.getCompletionsAtPosition(resource.toString(), offset, {
-			includeCompletionsForModuleExports: true,
-			includeCompletionsWithInsertText: true,
-			includeCompletionsForImportStatements: true,
+			...typescriptDefaults.getUserPreferences(),
 			triggerCharacter: _context.triggerCharacter as ts.CompletionsTriggerCharacter,
 			triggerKind: SuggestAdapter.convertTriggerKind(_context.triggerKind)
 		});
@@ -857,7 +855,7 @@ export class SuggestAdapter extends Adapter implements languages.CompletionItemP
 			entry.name,
 			{},
 			entry.source,
-			undefined,
+			typescriptDefaults.getUserPreferences(),
 			entry.data
 		);
 		if (token.isCancellationRequested || !details) {
@@ -1484,7 +1482,7 @@ export class CodeActionAdaptor extends FormatHelper implements languages.CodeAct
 			end,
 			errorCodes,
 			formatOptions,
-			{}
+			typescriptDefaults.getUserPreferences()
 		);
 
 		if (!codeFixes || model.isDisposed()) {
@@ -1559,9 +1557,8 @@ export class RenameAdapter extends Adapter implements languages.RenameProvider {
 			return;
 		}
 
-		const renameInfo = await worker.getRenameInfo(fileName, offset, {
-			allowRenameOfImportPath: false
-		});
+		const preferences = typescriptDefaults.getUserPreferences();
+		const renameInfo = await worker.getRenameInfo(fileName, offset, preferences);
 		if (renameInfo.canRename === false) {
 			// use explicit comparison so that the discriminated union gets resolved properly
 			return {
@@ -1578,7 +1575,7 @@ export class RenameAdapter extends Adapter implements languages.RenameProvider {
 			offset,
 			/*strings*/ false,
 			/*comments*/ false,
-			/*prefixAndSuffix*/ false
+			/*prefixAndSuffix*/ !!preferences.providePrefixAndSuffixTextForRename
 		);
 
 		if (!renameLocations || model.isDisposed()) {
