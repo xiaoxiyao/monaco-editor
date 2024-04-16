@@ -168,14 +168,49 @@ export interface WorkerOptions {
 	customWorkerPath?: string;
 }
 
-interface InlayHintsOptions {
+/**
+ * Copy from `typescript.UserPreferences`
+ */
+interface UserPreferences {
+	readonly disableSuggestions?: boolean;
+	readonly quotePreference?: 'auto' | 'double' | 'single';
+	readonly includeCompletionsForModuleExports?: boolean;
+	readonly includeCompletionsForImportStatements?: boolean;
+	readonly includeCompletionsWithSnippetText?: boolean;
+	readonly includeAutomaticOptionalChainCompletions?: boolean;
+	readonly includeCompletionsWithInsertText?: boolean;
+	readonly includeCompletionsWithClassMemberSnippets?: boolean;
+	readonly includeCompletionsWithObjectLiteralMethodSnippets?: boolean;
+	readonly useLabelDetailsInCompletionEntries?: boolean;
+	readonly allowIncompleteCompletions?: boolean;
+	readonly importModuleSpecifierPreference?:
+	| 'shortest'
+	| 'project-relative'
+	| 'relative'
+	| 'non-relative';
+	/** Determines whether we import `foo/index.ts` as "foo", "foo/index", or "foo/index.js" */
+	readonly importModuleSpecifierEnding?: 'auto' | 'minimal' | 'index' | 'js';
+	readonly allowTextChangesInNewFiles?: boolean;
+	readonly providePrefixAndSuffixTextForRename?: boolean;
+	readonly includePackageJsonAutoImports?: 'auto' | 'on' | 'off';
+	readonly provideRefactorNotApplicableReason?: boolean;
+	readonly jsxAttributeCompletionStyle?: 'auto' | 'braces' | 'none';
 	readonly includeInlayParameterNameHints?: 'none' | 'literals' | 'all';
 	readonly includeInlayParameterNameHintsWhenArgumentMatchesName?: boolean;
 	readonly includeInlayFunctionParameterTypeHints?: boolean;
 	readonly includeInlayVariableTypeHints?: boolean;
+	readonly includeInlayVariableTypeHintsWhenTypeMatchesName?: boolean;
 	readonly includeInlayPropertyDeclarationTypeHints?: boolean;
 	readonly includeInlayFunctionLikeReturnTypeHints?: boolean;
 	readonly includeInlayEnumMemberValueHints?: boolean;
+	readonly allowRenameOfImportPath?: boolean;
+	readonly autoImportFileExcludePatterns?: string[];
+	readonly organizeImportsIgnoreCase?: 'auto' | boolean;
+	readonly organizeImportsCollation?: 'ordinal' | 'unicode';
+	readonly organizeImportsLocale?: string;
+	readonly organizeImportsNumericCollation?: boolean;
+	readonly organizeImportsAccentCollation?: boolean;
+	readonly organizeImportsCaseFirst?: 'upper' | 'lower' | false;
 }
 
 interface IExtraLib {
@@ -307,8 +342,6 @@ export interface LanguageServiceDefaults {
 
 	readonly workerOptions: WorkerOptions;
 
-	readonly inlayHintsOptions: InlayHintsOptions;
-
 	readonly modeConfiguration: ModeConfiguration;
 	setModeConfiguration(modeConfiguration: ModeConfiguration): void;
 
@@ -381,9 +414,15 @@ export interface LanguageServiceDefaults {
 	getEagerModelSync(): boolean;
 
 	/**
-	 * Configure inlay hints options.
+	 * Set the TypeScript language service preferences.
+	 * @param options
 	 */
-	setInlayHintsOptions(options: InlayHintsOptions): void;
+	setUserPreferences(options: UserPreferences): void;
+
+	/**
+	 * Get the TypeScript language service current preferences.
+	 */
+	getUserPreferences(): Readonly<UserPreferences>;
 }
 
 export interface TypeScriptWorker {
@@ -429,7 +468,7 @@ export interface TypeScriptWorker {
 	/**
 	 * Get code completion details for the given file, position, and entry.
 	 * @param formatOptions `typescript.FormatCodeOptions | typescript.FormatCodeSettings | undefined`
-	 * @param preferences `typescript.UserPreferences | undefined`
+	 * @param preferences
 	 * @param data `typescript.CompletionEntryData | undefined`
 	 * @returns `Promise<typescript.CompletionEntryDetails | undefined>`
 	 */
@@ -439,7 +478,7 @@ export interface TypeScriptWorker {
 		entryName: string,
 		formatOptions: any,
 		source: string | undefined,
-		preferences: any,
+		preferences: UserPreferences | undefined,
 		data: any
 	): Promise<any | undefined>;
 
@@ -528,10 +567,10 @@ export interface TypeScriptWorker {
 
 	/**
 	 * Get edits which should be applied to rename the item at the given file and position (or a failure reason).
-	 * @param preferences `typescript.UserPreferences`
+	 * @param preferences
 	 * @returns `Promise<typescript.RenameInfo>`
 	 */
-	getRenameInfo(fileName: string, positon: number, preferences: any): Promise<any>;
+	getRenameInfo(fileName: string, positon: number, preferences: UserPreferences): Promise<any>;
 
 	/**
 	 * Get transpiled output for the given file.
@@ -546,7 +585,7 @@ export interface TypeScriptWorker {
 	/**
 	 * Get possible code fixes at the given position in the file.
 	 * @param formatOptions `typescript.FormatCodeOptions`
-	 * @param preferences `typescript.UserPreferences`
+	 * @param preferences
 	 * @returns `Promise<ReadonlyArray<typescript.CodeFixAction>>`
 	 */
 	getCodeFixesAtPosition(
@@ -555,15 +594,21 @@ export interface TypeScriptWorker {
 		end: number,
 		errorCodes: number[],
 		formatOptions: any,
-		preferences: any
+		preferences: UserPreferences
 	): Promise<ReadonlyArray<any>>;
 
 	/**
 	 * Get inlay hints in the range of the file.
 	 * @param fileName
+	 * @param preferences
 	 * @returns `Promise<typescript.InlayHint[]>`
 	 */
-	provideInlayHints(fileName: string, start: number, end: number): Promise<ReadonlyArray<any>>;
+	provideInlayHints(
+		fileName: string,
+		start: number,
+		end: number,
+		preferences?: UserPreferences
+	): Promise<ReadonlyArray<any>>;
 }
 
 // --- TypeScript configuration and defaults ---------
@@ -579,14 +624,13 @@ class LanguageServiceDefaultsImpl implements LanguageServiceDefaults {
 	private _diagnosticsOptions!: DiagnosticsOptions;
 	private _workerOptions!: WorkerOptions;
 	private _onDidExtraLibsChangeTimeout: number;
-	private _inlayHintsOptions!: InlayHintsOptions;
 	private _modeConfiguration!: ModeConfiguration;
+	private _userPreferences: UserPreferences;
 
 	constructor(
 		compilerOptions: CompilerOptions,
 		diagnosticsOptions: DiagnosticsOptions,
 		workerOptions: WorkerOptions,
-		inlayHintsOptions: InlayHintsOptions,
 		modeConfiguration: ModeConfiguration
 	) {
 		this._extraLibs = Object.create(null);
@@ -595,9 +639,9 @@ class LanguageServiceDefaultsImpl implements LanguageServiceDefaults {
 		this.setCompilerOptions(compilerOptions);
 		this.setDiagnosticsOptions(diagnosticsOptions);
 		this.setWorkerOptions(workerOptions);
-		this.setInlayHintsOptions(inlayHintsOptions);
 		this.setModeConfiguration(modeConfiguration);
 		this._onDidExtraLibsChangeTimeout = -1;
+		this._userPreferences = Object.create(null);
 	}
 
 	get onDidChange(): IEvent<void> {
@@ -614,10 +658,6 @@ class LanguageServiceDefaultsImpl implements LanguageServiceDefaults {
 
 	get workerOptions(): WorkerOptions {
 		return this._workerOptions;
-	}
-
-	get inlayHintsOptions(): InlayHintsOptions {
-		return this._inlayHintsOptions;
 	}
 
 	getExtraLibs(): IExtraLibs {
@@ -730,11 +770,6 @@ class LanguageServiceDefaultsImpl implements LanguageServiceDefaults {
 		this._onDidChange.fire(undefined);
 	}
 
-	setInlayHintsOptions(options: InlayHintsOptions): void {
-		this._inlayHintsOptions = options || Object.create(null);
-		this._onDidChange.fire(undefined);
-	}
-
 	setMaximumWorkerIdleTime(value: number): void { }
 
 	setEagerModelSync(value: boolean) {
@@ -750,6 +785,14 @@ class LanguageServiceDefaultsImpl implements LanguageServiceDefaults {
 	setModeConfiguration(modeConfiguration: ModeConfiguration): void {
 		this._modeConfiguration = modeConfiguration || Object.create(null);
 		this._onDidChange.fire(undefined);
+	}
+
+	setUserPreferences(options: UserPreferences): void {
+		this._userPreferences = options ?? Object.create(null);
+	}
+
+	getUserPreferences(): Readonly<UserPreferences> {
+		return this._userPreferences;
 	}
 }
 
@@ -775,14 +818,12 @@ export const typescriptDefaults: LanguageServiceDefaults = new LanguageServiceDe
 	{ allowNonTsExtensions: true, target: ScriptTarget.Latest },
 	{ noSemanticValidation: false, noSyntaxValidation: false, onlyVisible: false },
 	{},
-	{},
 	modeConfigurationDefault
 );
 
 export const javascriptDefaults: LanguageServiceDefaults = new LanguageServiceDefaultsImpl(
 	{ allowNonTsExtensions: true, allowJs: true, target: ScriptTarget.Latest },
 	{ noSemanticValidation: true, noSyntaxValidation: false, onlyVisible: false },
-	{},
 	{},
 	modeConfigurationDefault
 );
