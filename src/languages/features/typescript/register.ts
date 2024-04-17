@@ -562,7 +562,7 @@ export interface TypeScriptWorker {
 		positon: number,
 		findInStrings: boolean,
 		findInComments: boolean,
-		providePrefixAndSuffixTextForRename: boolean
+		preferences: UserPreferences
 	): Promise<readonly any[] | undefined>;
 
 	/**
