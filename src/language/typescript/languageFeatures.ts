@@ -544,6 +544,9 @@ class MyCompletionItem implements languages.CompletionItem {
 
 			this.detail = getScriptKindDetails(tsEntry);
 		}
+		if (tsEntry.isSnippet) {
+			this.insertTextRules = languages.CompletionItemInsertTextRule.InsertAsSnippet;
+		}
 	}
 
 	private get textLabel() {
