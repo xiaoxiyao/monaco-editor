@@ -413,7 +413,7 @@ export class TypeScriptWorker implements ts.LanguageServiceHost, ITypeScriptWork
 		position: number,
 		findInStrings: boolean,
 		findInComments: boolean,
-		providePrefixAndSuffixTextForRename: boolean
+		preferences: ts.UserPreferences
 	): Promise<readonly ts.RenameLocation[] | undefined> {
 		if (fileNameIsLib(fileName)) {
 			return undefined;
@@ -423,7 +423,7 @@ export class TypeScriptWorker implements ts.LanguageServiceHost, ITypeScriptWork
 			position,
 			findInStrings,
 			findInComments,
-			providePrefixAndSuffixTextForRename
+			preferences
 		);
 	}
 

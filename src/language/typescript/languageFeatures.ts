@@ -1582,7 +1582,7 @@ export class RenameAdapter extends Adapter implements languages.RenameProvider {
 			offset,
 			/*strings*/ false,
 			/*comments*/ false,
-			/*prefixAndSuffix*/ !!preferences.providePrefixAndSuffixTextForRename
+			preferences
 		);
 
 		if (!renameLocations || model.isDisposed()) {
@@ -1606,7 +1606,7 @@ export class RenameAdapter extends Adapter implements languages.RenameProvider {
 					versionId: undefined,
 					textEdit: {
 						range: textSpanToRange(model, renameLocation.textSpan),
-						text: newName
+						text: `${renameLocation.prefixText ?? ''}${newName}${renameLocation.suffixText ?? ''}`
 					}
 				});
 			} else {
